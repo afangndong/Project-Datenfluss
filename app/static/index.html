@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Mini-KOS – Klinik-Informationssystem (Demo)</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="logo">✚</span>
+      <div><strong>Mini-KOS</strong><small>Klinik-Informationssystem · Demo</small></div>
+    </div>
+    <nav id="tabs">
+      <button data-tab="dashboard" class="active">Dashboard</button>
+      <button data-tab="patienten">Patienten</button>
+      <button data-tab="termine">Termine</button>
+      <button data-tab="system">System</button>
+    </nav>
+    <div class="topright">
+      <span id="envBadge" class="badge">–</span>
+      <span id="healthDot" class="dot" title="Status"></span>
+      <button id="keyBtn" class="ghost" title="API-Key für Schreibzugriffe">🔑</button>
+    </div>
+  </header>
+
+  <div id="banner" class="banner" hidden>⚠ Wartungsarbeiten geplant – bitte Eingaben zeitnah speichern.</div>
+
+  <main>
+    <!-- DASHBOARD -->
+    <section id="tab-dashboard" class="tab">
+      <h1>Übersicht</h1>
+      <div class="cards" id="statCards"></div>
+      <div class="grid2" id="extraCards">
+        <div class="panel"><h2>Belegung je Station</h2><div id="belegung"></div></div>
+        <div class="panel"><h2>Termine nach Status</h2><div id="terminStatus"></div></div>
+      </div>
+      <div class="panel"><h2>Heutige Termine</h2><div id="heute"></div></div>
+    </section>
+
+    <!-- PATIENTEN -->
+    <section id="tab-patienten" class="tab" hidden>
+      <div class="toolbar">
+        <h1>Patienten</h1>
+        <input id="search" type="search" placeholder="Suche: Name oder Fallnummer …">
+        <button id="newPatient" class="primary">+ Neuer Patient</button>
+      </div>
+      <div class="split">
+        <div class="panel tablewrap"><table id="patTable">
+          <thead><tr><th>Fallnr.</th><th>Name</th><th>Geb.-Datum</th><th>Versicherung</th></tr></thead>
+          <tbody></tbody></table>
+          <p class="muted" id="patCount"></p>
+        </div>
+        <aside class="panel" id="detail"><p class="muted">Patient in der Liste auswählen.</p></aside>
+      </div>
+    </section>
+
+    <!-- TERMINE -->
+    <section id="tab-termine" class="tab" hidden>
+      <div class="toolbar">
+        <h1>Termine</h1>
+        <select id="statusFilter">
+          <option value="">Alle Status</option><option>geplant</option><option>erledigt</option><option>abgesagt</option>
+        </select>
+      </div>
+      <div class="panel tablewrap"><table id="apptTable">
+        <thead><tr><th>Termin</th><th>Patient</th><th>Art</th><th>Status</th><th>Aktionen</th></tr></thead>
+        <tbody></tbody></table></div>
+    </section>
+
+    <!-- SYSTEM -->
+    <section id="tab-system" class="tab" hidden>
+      <h1>Systemstatus</h1>
+      <div class="grid2">
+        <div class="panel"><h2>Instanz</h2><dl id="versionInfo" class="kv"></dl></div>
+        <div class="panel"><h2>Gesundheit</h2><dl id="healthInfo" class="kv"></dl></div>
+        <div class="panel"><h2>Feature Flags</h2><div id="flagList"></div></div>
+        <div class="panel"><h2>Betriebs-Werkzeuge</h2><ul id="linkList" class="links"></ul></div>
+      </div>
+      <div class="panel" id="simPanel">
+        <h2>Störungs-Simulation <small class="muted">(nur dev/test – für Alert- und Support-Übungen)</small></h2>
+        <button id="simErr" class="danger">HTTP-500 auslösen</button>
+        <button id="simSlow" class="danger">Langsame Antwort (3 s)</button>
+        <p class="muted">Erzeugt Fehler/Latenz-Metriken → Prometheus-Regeln <code>HighErrorRate</code> / <code>HighLatency</code> → Alertmanager.</p>
+      </div>
+    </section>
+  </main>
+
+  <!-- Dialoge -->
+  <dialog id="dlgPatient"><form method="dialog" id="formPatient">
+    <h2 id="dlgPatientTitle">Neuer Patient</h2>
+    <label>Vorname <input name="vorname" required maxlength="80"></label>
+    <label>Nachname <input name="nachname" required maxlength="80"></label>
+    <label>Geburtsdatum <input name="geburtsdatum" type="date" required></label>
+    <label>Geschlecht <select name="geschlecht"><option>weiblich</option><option>männlich</option><option selected>divers</option></select></label>
+    <label>Versicherung <input name="versicherung" value="gesetzlich" maxlength="80"></label>
+    <menu><button value="cancel" class="ghost" formnovalidate>Abbrechen</button><button class="primary" value="ok">Speichern</button></menu>
+  </form></dialog>
+
+  <dialog id="dlgStay"><form method="dialog" id="formStay">
+    <h2>Aufenthalt anlegen</h2>
+    <label>Station <input name="station" required maxlength="40" list="stationen"></label>
+    <datalist id="stationen"><option>Innere A</option><option>Innere B</option><option>Chirurgie</option><option>Orthopädie</option><option>Reha</option><option>Geriatrie</option></datalist>
+    <label>Zimmer <input name="zimmer" required maxlength="10"></label>
+    <label>Aufnahme <input name="aufnahme" type="date" required></label>
+    <label>Diagnose / Anlass <input name="diagnose" maxlength="2000"></label>
+    <menu><button value="cancel" class="ghost" formnovalidate>Abbrechen</button><button class="primary" value="ok">Speichern</button></menu>
+  </form></dialog>
+
+  <dialog id="dlgAppt"><form method="dialog" id="formAppt">
+    <h2>Termin anlegen</h2>
+    <label>Datum &amp; Uhrzeit <input name="termin" type="datetime-local" required></label>
+    <label>Art <select name="art"><option>Untersuchung</option><option>Visite</option><option>Therapie</option><option>Entlassgespräch</option><option>Sonstiges</option></select></label>
+    <label>Bemerkung <input name="bemerkung" maxlength="2000"></label>
+    <menu><button value="cancel" class="ghost" formnovalidate>Abbrechen</button><button class="primary" value="ok">Speichern</button></menu>
+  </form></dialog>
+
+  <dialog id="dlgKey"><form method="dialog" id="formKey">
+    <h2>API-Key</h2>
+    <p class="muted">Nur nötig, wenn der Server mit <code>API_KEY</code> gestartet wurde. Wird nur in dieser Browser-Sitzung gespeichert.</p>
+    <label>X-API-Key <input name="key" type="password" autocomplete="off"></label>
+    <menu><button value="cancel" class="ghost" formnovalidate>Abbrechen</button><button class="primary" value="ok">Übernehmen</button></menu>
+  </form></dialog>
+
+  <div id="toasts"></div>
+  <footer>Mini-KOS · Demo-Projekt mit ausschließlich <strong>fiktiven</strong> Daten · <a href="/docs">API-Dokumentation</a></footer>
+  <script src="/static/app.js"></script>
+</body>
+</html>
