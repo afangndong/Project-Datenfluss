@@ -1,0 +1,23 @@
+# Produktion (on-premise): Ressourcenlimits, Log-Rotation, Neustart-Policy, keine Dev-Ports.
+x-logging: &logging
+  driver: json-file
+  options: { max-size: "10m", max-file: "5" }
+
+services:
+  app_blue:
+    env_file: [env/prod.env]
+    logging: *logging
+    deploy: { resources: { limits: { cpus: "1.0", memory: 512M } } }
+  app_green:
+    env_file: [env/prod.env]
+    logging: *logging
+    deploy: { resources: { limits: { cpus: "1.0", memory: 512M } } }
+  app_canary:
+    env_file: [env/prod.env]
+    logging: *logging
+    deploy: { resources: { limits: { cpus: "1.0", memory: 512M } } }
+  db:
+    logging: *logging
+    deploy: { resources: { limits: { cpus: "2.0", memory: 1G } } }
+  proxy:
+    logging: *logging

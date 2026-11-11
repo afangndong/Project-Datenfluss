@@ -1,0 +1,10 @@
+# Test/Staging: wie prod, aber mit Testdaten, ohne persistente Volumes für die DB.
+services:
+  app_blue:
+    env_file: [env/test.env]
+  app_green:
+    env_file: [env/test.env]
+  app_canary:
+    env_file: [env/test.env]
+  db:
+    tmpfs: [/var/lib/postgresql/data]

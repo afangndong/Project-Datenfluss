@@ -1,0 +1,8 @@
+# Entwicklung: Quellcode live eingebunden, DB-Port nach außen, Debug-Logs.
+services:
+  app_blue:
+    env_file: [env/dev.env]
+    volumes: ["./app:/srv/app"]
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+  db:
+    ports: ["5432:5432"]

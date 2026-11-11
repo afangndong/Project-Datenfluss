@@ -1,0 +1,248 @@
+# Mini-KOS – Basis-Stack. Profile steuern, was startet:
+#   (ohne)      db + app_blue + proxy                 → Kern
+#   monitoring  Prometheus, Alertmanager, Grafana, cAdvisor, node-/postgres-exporter, alert-webhook
+#   elk         Elasticsearch, Logstash, Kibana, Filebeat
+#   flags       Unleash (Feature Flags)
+#   green|canary  zweite/dritte App-Instanz für Blue-Green bzw. Canary (siehe scripts/deploy_*.sh)
+name: minikos
+
+x-app: &app
+  build:
+    context: .
+    args: { GIT_SHA: "${GIT_SHA:-local}" }
+  env_file: [env/dev.env]
+  environment: &app-env
+    DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER:-minikos}:${POSTGRES_PASSWORD:-minikos}@db:5432/${POSTGRES_DB:-minikos}
+    GIT_SHA: ${GIT_SHA:-local}
+  depends_on:
+    db: { condition: service_healthy }
+  restart: unless-stopped
+  networks: [kos]
+  healthcheck:
+    test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/ready', timeout=2).status==200 else 1)"]
+    interval: 10s
+    timeout: 3s
+    retries: 3
+    start_period: 10s
+
+services:
+  # ---------------- Kern ----------------
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-minikos}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-minikos}
+      POSTGRES_DB: ${POSTGRES_DB:-minikos}
+    volumes: [pgdata:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+    networks: [kos]
+
+  app_blue:
+    <<: *app
+    image: ${APP_IMAGE:-mini-kos}:${BLUE_TAG:-local}
+    build: { context: ., args: { GIT_SHA: "${GIT_SHA:-local}", APP_VERSION: "${BLUE_TAG:-local}" } }
+    environment: { <<: *app-env, INSTANCE_NAME: blue, APP_VERSION: "${BLUE_TAG:-local}" }
+
+  app_green:
+    <<: *app
+    image: ${APP_IMAGE:-mini-kos}:${GREEN_TAG:-local}
+    build: { context: ., args: { GIT_SHA: "${GIT_SHA:-local}", APP_VERSION: "${GREEN_TAG:-local}" } }
+    environment: { <<: *app-env, INSTANCE_NAME: green, APP_VERSION: "${GREEN_TAG:-local}" }
+    profiles: [green]
+
+  app_canary:
+    <<: *app
+    image: ${APP_IMAGE:-mini-kos}:${CANARY_TAG:-local}
+    build: { context: ., args: { GIT_SHA: "${GIT_SHA:-local}", APP_VERSION: "${CANARY_TAG:-local}" } }
+    environment: { <<: *app-env, INSTANCE_NAME: canary, APP_VERSION: "${CANARY_TAG:-local}" }
+    profiles: [canary]
+
+  proxy:
+    image: nginx:1.27-alpine
+    ports: ["${PROXY_PORT:-8080}:80"]
+    volumes:
+      - ./nginx/conf.d:/etc/nginx/conf.d:ro
+    depends_on: [app_blue]
+    restart: unless-stopped
+    networks: [kos]
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1/healthz"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+
+  # ---------------- Monitoring ----------------
+  prometheus:
+    image: prom/prometheus:v2.55.1
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.retention.time=15d
+      - --web.enable-lifecycle
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./monitoring/alert_rules.yml:/etc/prometheus/alert_rules.yml:ro
+      - promdata:/prometheus
+    ports: ["${PROMETHEUS_PORT:-9090}:9090"]
+    profiles: [monitoring]
+    restart: unless-stopped
+    networks: [kos]
+
+  alertmanager:
+    image: prom/alertmanager:v0.27.0
+    command: [--config.file=/etc/alertmanager/alertmanager.yml]
+    volumes: [./monitoring/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro]
+    ports: ["${ALERTMANAGER_PORT:-9093}:9093"]
+    profiles: [monitoring]
+    restart: unless-stopped
+    networks: [kos]
+
+  alert-webhook:
+    image: python:3.12-slim
+    command: ["python", "/app/alert_webhook.py"]
+    environment:
+      SLACK_WEBHOOK_URL: ${SLACK_WEBHOOK_URL:-}
+    volumes: [./monitoring/alert_webhook.py:/app/alert_webhook.py:ro]
+    profiles: [monitoring]
+    restart: unless-stopped
+    networks: [kos]
+
+  grafana:
+    image: grafana/grafana:11.3.1
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:-admin}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafanadata:/var/lib/grafana
+    ports: ["${GRAFANA_PORT:-3000}:3000"]
+    depends_on: [prometheus]
+    profiles: [monitoring]
+    restart: unless-stopped
+    networks: [kos]
+
+  cadvisor:
+    image: gcr.io/cadvisor/cadvisor:v0.49.1
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:ro
+      - /sys:/sys:ro
+      - /var/lib/docker/:/var/lib/docker:ro
+    profiles: [monitoring]
+    restart: unless-stopped
+    networks: [kos]
+
+  node-exporter:
+    image: prom/node-exporter:v1.8.2
+    command:
+      - --path.rootfs=/host
+      - --collector.textfile.directory=/textfile
+    volumes:
+      - /:/host:ro,rslave
+      - ./.backup/metrics:/textfile:ro
+    profiles: [monitoring]
+    restart: unless-stopped
+    networks: [kos]
+
+  postgres-exporter:
+    image: prometheuscommunity/postgres-exporter:v0.16.0
+    environment:
+      DATA_SOURCE_NAME: postgresql://${POSTGRES_USER:-minikos}:${POSTGRES_PASSWORD:-minikos}@db:5432/${POSTGRES_DB:-minikos}?sslmode=disable
+    depends_on:
+      db: { condition: service_healthy }
+    profiles: [monitoring]
+    restart: unless-stopped
+    networks: [kos]
+
+  # ---------------- ELK ----------------
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.15.3
+    environment:
+      discovery.type: single-node
+      xpack.security.enabled: "false"
+      ES_JAVA_OPTS: -Xms512m -Xmx512m
+    volumes: [esdata:/usr/share/elasticsearch/data]
+    ulimits: { memlock: { soft: -1, hard: -1 } }
+    healthcheck:
+      test: ["CMD-SHELL", "curl -s http://localhost:9200/_cluster/health | grep -qE 'green|yellow'"]
+      interval: 15s
+      timeout: 5s
+      retries: 20
+    profiles: [elk]
+    restart: unless-stopped
+    networks: [kos]
+
+  logstash:
+    image: docker.elastic.co/logstash/logstash:8.15.3
+    environment: { LS_JAVA_OPTS: -Xms256m -Xmx256m }
+    volumes: [./elk/logstash/pipeline:/usr/share/logstash/pipeline:ro]
+    depends_on:
+      elasticsearch: { condition: service_healthy }
+    profiles: [elk]
+    restart: unless-stopped
+    networks: [kos]
+
+  kibana:
+    image: docker.elastic.co/kibana/kibana:8.15.3
+    environment: { ELASTICSEARCH_HOSTS: "http://elasticsearch:9200" }
+    ports: ["${KIBANA_PORT:-5601}:5601"]
+    depends_on:
+      elasticsearch: { condition: service_healthy }
+    profiles: [elk]
+    restart: unless-stopped
+    networks: [kos]
+
+  filebeat:
+    image: docker.elastic.co/beats/filebeat:8.15.3
+    user: root
+    command: ["filebeat", "-e", "--strict.perms=false"]
+    volumes:
+      - ./elk/filebeat/filebeat.yml:/usr/share/filebeat/filebeat.yml:ro
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    depends_on: [logstash]
+    profiles: [elk]
+    restart: unless-stopped
+    networks: [kos]
+
+  # ---------------- Feature Flags ----------------
+  unleash-db:
+    image: postgres:16-alpine
+    environment: { POSTGRES_USER: unleash, POSTGRES_PASSWORD: unleash, POSTGRES_DB: unleash }
+    volumes: [unleashdata:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U unleash"]
+      interval: 5s
+      retries: 10
+    profiles: [flags]
+    networks: [kos]
+
+  unleash:
+    image: unleashorg/unleash-server:6
+    environment:
+      DATABASE_URL: postgres://unleash:unleash@unleash-db/unleash
+      DATABASE_SSL: "false"
+      INIT_CLIENT_API_TOKENS: "default:development.unleash-insecure-client-token"
+      INIT_ADMIN_API_TOKENS: "*:*.unleash-insecure-admin-token"
+    ports: ["${UNLEASH_PORT:-4242}:4242"]
+    depends_on:
+      unleash-db: { condition: service_healthy }
+    profiles: [flags]
+    restart: unless-stopped
+    networks: [kos]
+
+networks:
+  kos: {}
+
+volumes:
+  pgdata:
+  promdata:
+  grafanadata:
+  esdata:
+  unleashdata:
