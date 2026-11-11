@@ -1,0 +1,17 @@
+filebeat.autodiscover:
+  providers:
+    - type: docker
+      hints.enabled: false
+      templates:
+        - condition:
+            regexp: { docker.container.name: "minikos-(app_|proxy|alert-webhook).*" }
+          config:
+            - type: container
+              paths: ["/var/lib/docker/containers/${data.docker.container.id}/*.log"]
+
+processors:
+  - add_docker_metadata: ~
+  - drop_fields: { fields: ["agent", "ecs", "input", "log.offset"], ignore_missing: true }
+
+output.logstash:
+  hosts: ["logstash:5044"]
