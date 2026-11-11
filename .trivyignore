@@ -1,0 +1,3 @@
+# Bekannte, bewusst akzeptierte Schwachstellen – JEDE Zeile mit Begründung und Ablaufdatum!
+# Beispiel:
+# CVE-2024-00000   # Begründung: nicht ausnutzbar, weil …  (Review bis 2026-12-31)

@@ -1,0 +1,79 @@
+# Deployment per Ansible auf On-Premise-Server.
+#  - automatisch für "test" aus ci.yml (wenn DEPLOY_ENABLED=true)
+#  - manuell für "production": Actions → Deploy → Run workflow
+#
+# Vier-Augen-Prinzip: Settings → Environments → "production" → "Required reviewers" setzen.
+# Läuft auf einem Self-hosted Runner mit Label "on-prem" (Zugriff auf die Zielserver).
+name: Deploy
+
+on:
+  workflow_call:
+    inputs:
+      environment: { type: string, required: true }
+      image_tag: { type: string, required: true }
+      strategy: { type: string, required: false, default: rolling }
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: Zielumgebung
+        type: choice
+        options: [test, production]
+        default: test
+      image_tag:
+        description: Image-Tag (Commit-Kurzhash aus dem CI-Lauf, z. B. ab12cd34)
+        type: string
+        required: true
+      strategy:
+        description: Deployment-Strategie
+        type: choice
+        options: [rolling, bluegreen, canary, recreate]
+        default: rolling
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    name: ${{ inputs.environment }} · ${{ inputs.strategy }} · ${{ inputs.image_tag }}
+    if: vars.DEPLOY_ENABLED == 'true'
+    runs-on: [self-hosted, on-prem]
+    environment: ${{ inputs.environment }}
+    concurrency:
+      group: deploy-${{ inputs.environment }}   # nie zwei Deployments gleichzeitig pro Umgebung
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Ansible installieren
+        run: pip install ansible
+
+      - name: SSH und Vault vorbereiten
+        env:
+          SSH_KEY: ${{ secrets.ANSIBLE_SSH_KEY }}
+          KNOWN_HOSTS: ${{ secrets.SSH_KNOWN_HOSTS }}
+          VAULT_PASS: ${{ secrets.ANSIBLE_VAULT_PASS }}
+        run: |
+          install -d -m 700 ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/id_ed25519 && chmod 600 ~/.ssh/id_ed25519
+          printf '%s\n' "$KNOWN_HOSTS" > ~/.ssh/known_hosts
+          printf '%s' "$VAULT_PASS" > "$RUNNER_TEMP/vault_pass" && chmod 600 "$RUNNER_TEMP/vault_pass"
+
+      - name: Ansible-Deployment
+        working-directory: ansible
+        env:
+          ENV_NAME: ${{ inputs.environment == 'production' && 'prod' || inputs.environment }}
+          TAG: ${{ inputs.image_tag }}
+          STRATEGY: ${{ inputs.strategy }}
+        run: |
+          IMAGE="ghcr.io/${GITHUB_REPOSITORY,,}"
+          ansible-playbook -i "inventories/${ENV_NAME}/hosts.yml" playbooks/deploy.yml \
+            --vault-password-file "$RUNNER_TEMP/vault_pass" \
+            -e app_tag="$TAG" -e app_image="$IMAGE" -e deploy_strategy="$STRATEGY"
+
+      - name: Geheimnisse vom Runner löschen
+        if: always()
+        run: rm -f ~/.ssh/id_ed25519 "$RUNNER_TEMP/vault_pass"

@@ -1,0 +1,214 @@
+# Mini-KOS – GitLab CI/CD (on-premise-tauglich: Docker-Runner, Registry, Ansible-Deploy)
+#
+# Ablauf (DAG über `needs`, Lint+Test laufen parallel):
+#   lint ─┐
+#   test ─┴→ build → scan (Trivy) → deploy:test (auto, main) → deploy:prod (manuell, Vier-Augen)
+#
+# Benötigte CI/CD-Variablen (Settings → CI/CD → Variables, "masked"/"protected"):
+#   ANSIBLE_SSH_KEY   (Typ File)   privater Schlüssel des Deploy-Users
+#   ANSIBLE_VAULT_PASS (Typ File)  Vault-Passwort
+#   SSH_KNOWN_HOSTS   (Typ File)   Host-Keys der Zielserver (ssh-keyscan -H kos-prod-01 …)
+#   REPORT_TOKEN      optional: Project-Access-Token (read_api) für report:cache
+#   DEPLOY_STRATEGY   optional: rolling | bluegreen | canary | recreate  (Standard rolling)
+
+workflow:
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH && $CI_OPEN_MERGE_REQUESTS
+      when: never                       # keine doppelten Pipelines (Branch + MR)
+    - if: $CI_COMMIT_BRANCH
+    - if: $CI_COMMIT_TAG
+
+stages: [lint, test, build, scan, deploy, report]
+
+variables:
+  PIP_CACHE_DIR: "$CI_PROJECT_DIR/.cache/pip"
+  IMAGE: "$CI_REGISTRY_IMAGE"
+  TAG: "$CI_COMMIT_SHORT_SHA"
+  DOCKER_BUILDKIT: "1"
+  DEPLOY_STRATEGY: "rolling"
+
+# Gemeinsamer pip-Cache: Schlüssel hängt am Hash der requirements → bei Änderung neuer Cache
+.python-cache: &python-cache
+  cache:
+    key:
+      files: [requirements.txt, requirements-dev.txt]
+      prefix: pip
+    paths: [.cache/pip]
+    policy: pull-push
+
+# ------------------------------- LINT (parallel, ohne Wartezeit) ------------------------------
+lint:ruff:
+  stage: lint
+  image: python:3.12-slim
+  needs: []
+  <<: *python-cache
+  script:
+    - pip install -r requirements-dev.txt
+    - ruff check .
+    - ruff format --check .
+
+lint:shell:
+  stage: lint
+  image: { name: koalaman/shellcheck-alpine:stable, entrypoint: [""] }
+  needs: []
+  script: [shellcheck -x -S warning scripts/*.sh elk/setup_ilm.sh]
+
+lint:dockerfile:
+  stage: lint
+  image: { name: hadolint/hadolint:latest-alpine, entrypoint: [""] }
+  needs: []
+  script: [hadolint --ignore DL3008 --ignore DL3013 Dockerfile]
+
+lint:yaml-ansible:
+  stage: lint
+  image: python:3.12-slim
+  needs: []
+  script:
+    - pip install --quiet yamllint ansible
+    - 'yamllint -d "{extends: relaxed, rules: {line-length: {max: 200}}}" .gitlab-ci.yml docker-compose*.yml monitoring elk ansible'
+    - cd ansible && for pb in provision deploy teardown backup; do ansible-playbook -i inventories/dev/hosts.yml playbooks/$pb.yml --syntax-check; done
+    - cd .. && python -c "import json; json.load(open('monitoring/grafana/dashboards/minikos.json'))"
+
+lint:prometheus:
+  stage: lint
+  image: { name: prom/prometheus:v2.55.1, entrypoint: [""] }
+  needs: []
+  script:
+    - promtool check rules monitoring/alert_rules.yml
+  allow_failure: false
+
+# ------------------------------------ TEST ------------------------------------------------
+test:pytest:
+  stage: test
+  image: python:3.12-slim
+  needs: []
+  <<: *python-cache
+  script:
+    - pip install -r requirements-dev.txt pytest-cov
+    - pytest --cov=app --cov-report=term --cov-report=xml:coverage.xml --junitxml=report.xml
+  coverage: '/TOTAL.*\s+(\d+%)$/'
+  artifacts:
+    when: always
+    reports:
+      junit: report.xml
+      coverage_report: { coverage_format: cobertura, path: coverage.xml }
+
+# ------------------------------------ BUILD -----------------------------------------------
+build:image:
+  stage: build
+  image: docker:27
+  services: [docker:27-dind]
+  needs: [lint:ruff, lint:dockerfile, test:pytest]
+  variables: { DOCKER_TLS_CERTDIR: "/certs" }
+  before_script:
+    - echo "$CI_REGISTRY_PASSWORD" | docker login -u "$CI_REGISTRY_USER" --password-stdin "$CI_REGISTRY"
+  script:
+    # Registry-Cache: unveränderte Layer (Dependencies) werden wiederverwendet
+    - docker pull "$IMAGE:cache" || true
+    - >
+      docker build --cache-from "$IMAGE:cache" --build-arg BUILDKIT_INLINE_CACHE=1
+      --build-arg APP_VERSION="$TAG" --build-arg GIT_SHA="$CI_COMMIT_SHA"
+      -t "$IMAGE:$TAG" -t "$IMAGE:cache" .
+    - docker push "$IMAGE:$TAG"
+    - docker push "$IMAGE:cache"
+    - 'if [ "$CI_COMMIT_BRANCH" = "$CI_DEFAULT_BRANCH" ]; then docker tag "$IMAGE:$TAG" "$IMAGE:latest" && docker push "$IMAGE:latest"; fi'
+
+# ------------------------------------ SCAN ------------------------------------------------
+scan:trivy:
+  stage: scan
+  image: { name: aquasec/trivy:latest, entrypoint: [""] }
+  needs: [build:image]
+  variables:
+    TRIVY_USERNAME: "$CI_REGISTRY_USER"
+    TRIVY_PASSWORD: "$CI_REGISTRY_PASSWORD"
+    TRIVY_NO_PROGRESS: "true"
+  script:
+    - trivy image --format json --output trivy-report.json "$IMAGE:$TAG"        # vollständiger Bericht
+    - trivy image --exit-code 1 --severity HIGH,CRITICAL --ignore-unfixed --ignorefile .trivyignore "$IMAGE:$TAG"   # Gate
+    - trivy config --exit-code 0 .                                              # Dockerfile/Compose-Fehlkonfigurationen (informativ)
+  artifacts:
+    when: always
+    paths: [trivy-report.json]
+    expire_in: 30 days
+
+# ------------------------------------ DEPLOY ----------------------------------------------
+.deploy-base: &deploy-base
+  image: python:3.12-slim
+  needs: [scan:trivy]
+  before_script:
+    - apt-get update -qq && apt-get install -y -qq openssh-client rsync >/dev/null
+    - pip install --quiet ansible
+    - cd ansible
+    - mkdir -p ~/.ssh && chmod 700 ~/.ssh
+    - cp "$ANSIBLE_SSH_KEY" ~/.ssh/id_ed25519 && chmod 600 ~/.ssh/id_ed25519
+    - cp "$SSH_KNOWN_HOSTS" ~/.ssh/known_hosts          # CI-Variable (Typ File): `ssh-keyscan -H <host>` einmalig erzeugen
+  script:
+    - >
+      ansible-playbook -i "inventories/$ENVIRONMENT/hosts.yml" playbooks/deploy.yml
+      --vault-password-file "$ANSIBLE_VAULT_PASS"
+      -e app_tag="$TAG" -e app_image="$IMAGE" -e deploy_strategy="$DEPLOY_STRATEGY"
+  tags: [on-prem]   # Runner im Firmennetz mit SSH-Zugang zu den Zielhosts
+
+deploy:test:
+  <<: *deploy-base
+  stage: deploy
+  variables: { ENVIRONMENT: test }
+  environment: { name: test, url: "http://kos-test-01:8080" }
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+
+deploy:prod:
+  <<: *deploy-base
+  stage: deploy
+  needs: [deploy:test]
+  variables: { ENVIRONMENT: prod }
+  environment: { name: production, url: "http://kos-prod-01" }
+  resource_group: production            # nie zwei Prod-Deployments gleichzeitig
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+      when: manual                      # Freigabe per Klick; Vier-Augen via "Protected Environment" + Approval Rules (UI)
+  allow_failure: false
+
+# Review-Umgebung pro Merge Request (manuell starten, beim Schließen des MR automatisch abbauen)
+deploy:review:
+  <<: *deploy-base
+  stage: deploy
+  needs: [scan:trivy]
+  variables: { ENVIRONMENT: test }
+  environment:
+    name: review/$CI_MERGE_REQUEST_IID
+    on_stop: stop:review
+    auto_stop_in: 3 days
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+      when: manual
+      allow_failure: true
+
+stop:review:
+  <<: *deploy-base
+  stage: deploy
+  needs: []
+  variables: { ENVIRONMENT: test }
+  environment: { name: review/$CI_MERGE_REQUEST_IID, action: stop }
+  script:
+    - ansible-playbook -i "inventories/$ENVIRONMENT/hosts.yml" playbooks/teardown.yml -e review_name="mr-$CI_MERGE_REQUEST_IID"
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+      when: manual
+      allow_failure: true
+
+# ------------------------------------ REPORT ----------------------------------------------
+report:cache:
+  stage: report
+  image: python:3.12-slim
+  needs: []
+  script:
+    - pip install --quiet matplotlib
+    - python scripts/pipeline_cache_report.py --project "$CI_PROJECT_ID" --pipelines 20 --out reports
+  variables: { GITLAB_TOKEN: "$REPORT_TOKEN" }   # Project-Access-Token mit read_api
+  artifacts: { paths: [reports/], expire_in: 14 days }
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "schedule"
+    - when: manual
+      allow_failure: true

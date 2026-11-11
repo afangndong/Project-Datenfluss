@@ -1,0 +1,197 @@
+# Mini-KOS – CI auf GitHub Actions (Gegenstück zu .gitlab-ci.yml)
+#
+#   lint (5 Jobs parallel) ─┐
+#   test ───────────────────┴→ build (bauen → Trivy-Scan → erst dann pushen) → deploy-test (main, optional)
+#
+# Deployment auf eigene Server ist AUS, solange die Repository-Variable DEPLOY_ENABLED nicht 'true' ist
+# (GitHub-Runner erreichen On-Premise-Server nicht; dafür Self-hosted Runner mit Label "on-prem" einrichten).
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  lint-python:
+    name: Lint (ruff)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+      - run: pip install -r requirements-dev.txt
+      - run: ruff check .
+      - run: ruff format --check .
+
+  lint-shell:
+    name: Lint (shellcheck)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: shellcheck -x -S warning scripts/*.sh elk/setup_ilm.sh
+
+  lint-dockerfile:
+    name: Lint (hadolint)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hadolint/hadolint-action@v3.1.0
+        with:
+          dockerfile: Dockerfile
+          ignore: DL3008,DL3013
+
+  lint-config:
+    name: Lint (YAML, Ansible, Prometheus, Dashboard)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install yamllint ansible-core
+      - name: yamllint
+        run: |
+          yamllint -d "{extends: relaxed, rules: {line-length: {max: 200}}}" \
+            .github .gitlab-ci.yml docker-compose*.yml monitoring elk ansible
+      - name: Ansible Syntax-Check
+        working-directory: ansible
+        run: |
+          ansible-galaxy collection install -r requirements.yml
+          for pb in provision deploy teardown backup; do
+            ansible-playbook -i inventories/dev/hosts.yml playbooks/$pb.yml --syntax-check
+          done
+      - name: Grafana-Dashboard ist gültiges JSON
+        run: python -c "import json; json.load(open('monitoring/grafana/dashboards/minikos.json'))"
+      - name: Prometheus-Alertregeln (promtool)
+        run: |
+          docker run --rm -v "$PWD/monitoring:/m:ro" --entrypoint promtool \
+            prom/prometheus:v2.55.1 check rules /m/alert_rules.yml
+      - name: Compose-Dateien auflösbar
+        run: |
+          cp env/prod.env.example env/prod.env
+          docker compose -f docker-compose.yml -f docker-compose.prod.yml \
+            --profile monitoring --profile elk --profile flags --profile green --profile canary config -q
+
+  test:
+    name: Tests (pytest)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+      - run: pip install -r requirements-dev.txt pytest-cov
+      - run: pytest --cov=app --cov-report=term --cov-report=xml --junitxml=report.xml
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: test-reports
+          path: |
+            report.xml
+            coverage.xml
+
+  build:
+    name: Build, Trivy-Scan, Push
+    needs: [lint-python, lint-shell, lint-dockerfile, lint-config, test]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      tag: ${{ steps.meta.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Image-Name (muss klein geschrieben sein) und Tag
+        id: meta
+        run: |
+          echo "image=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+          echo "tag=${GITHUB_SHA::8}" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Anmeldung bei ghcr.io
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Bauen (lokal laden, noch nicht pushen)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          tags: ${{ steps.meta.outputs.image }}:${{ steps.meta.outputs.tag }}
+          build-args: |
+            APP_VERSION=${{ steps.meta.outputs.tag }}
+            GIT_SHA=${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Trivy – vollständiger Bericht (JSON)
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: ${{ steps.meta.outputs.image }}:${{ steps.meta.outputs.tag }}
+          format: json
+          output: trivy-report.json
+          exit-code: "0"
+
+      - name: Trivy – Gate (HIGH/CRITICAL mit verfügbarem Fix brechen ab)
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: ${{ steps.meta.outputs.image }}:${{ steps.meta.outputs.tag }}
+          format: table
+          exit-code: "1"
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          trivyignores: .trivyignore
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: trivy-report
+          path: trivy-report.json
+          retention-days: 30
+
+      - name: Pushen (nur nach bestandenem Scan, nicht bei Pull Requests)
+        if: github.event_name != 'pull_request'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ steps.meta.outputs.image }}:${{ steps.meta.outputs.tag }}
+            ${{ steps.meta.outputs.image }}:cache
+            ${{ github.ref == 'refs/heads/main' && format('{0}:latest', steps.meta.outputs.image) || '' }}
+          build-args: |
+            APP_VERSION=${{ steps.meta.outputs.tag }}
+            GIT_SHA=${{ github.sha }}
+          cache-from: type=gha
+
+  deploy-test:
+    name: Deploy → Test
+    needs: build
+    if: github.ref == 'refs/heads/main' && vars.DEPLOY_ENABLED == 'true'
+    uses: ./.github/workflows/deploy.yml
+    with:
+      environment: test
+      image_tag: ${{ needs.build.outputs.tag }}
+      strategy: bluegreen
+    secrets: inherit

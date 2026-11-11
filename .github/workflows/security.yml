@@ -1,0 +1,63 @@
+# Wöchentlicher Sicherheitslauf: neu bekannt gewordene Schwachstellen auch in alten Images und im Repo finden.
+name: Security
+
+on:
+  schedule:
+    - cron: "17 3 * * 1"      # montags 03:17 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: read
+
+jobs:
+  trivy-repo:
+    name: Trivy (Dateisystem + Konfiguration)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Abhängigkeiten (requirements.txt)
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          scanners: vuln
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+          trivyignores: .trivyignore
+      - name: Fehlkonfigurationen (Dockerfile, Compose)
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          scan-type: config
+          scan-ref: .
+          exit-code: "0"
+
+  trivy-image:
+    name: Trivy (veröffentlichtes Image)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Gibt es schon ein Image?
+        id: exists
+        run: |
+          IMAGE="ghcr.io/${GITHUB_REPOSITORY,,}:latest"
+          echo "image=$IMAGE" >> "$GITHUB_OUTPUT"
+          if docker pull "$IMAGE" >/dev/null 2>&1; then echo "found=true" >> "$GITHUB_OUTPUT"; else echo "found=false" >> "$GITHUB_OUTPUT"; fi
+      - name: Scan
+        if: steps.exists.outputs.found == 'true'
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: ${{ steps.exists.outputs.image }}
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+          trivyignores: .trivyignore
+      - name: Hinweis
+        if: steps.exists.outputs.found != 'true'
+        run: echo "Noch kein Image veröffentlicht – Scan übersprungen."
