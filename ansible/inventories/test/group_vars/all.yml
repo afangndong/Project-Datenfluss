@@ -1,0 +1,13 @@
+mini_kos_env: test
+mini_kos_dir: /opt/mini-kos
+mini_kos_sync_files: true
+app_image: registry.example.com/group/mini-kos       # TODO: $CI_REGISTRY_IMAGE
+app_tag: latest
+deploy_strategy: bluegreen
+enable_monitoring: true
+enable_elk: false
+enable_flags: false
+docker_install: true
+backup_cron_enabled: true
+registry_login: true
+proxy_port: 8080

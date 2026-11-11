@@ -1,0 +1,16 @@
+mini_kos_env: prod
+mini_kos_dir: /opt/mini-kos
+mini_kos_sync_files: true
+app_image: registry.example.com/group/mini-kos       # TODO: $CI_REGISTRY_IMAGE
+app_tag: latest                                      # CI übergibt -e app_tag=<commit-sha>
+deploy_strategy: rolling                             # rolling | bluegreen | canary | recreate
+rolling_replicas: 2
+enable_monitoring: true
+enable_elk: true
+enable_flags: false
+docker_install: true
+backup_cron_enabled: true
+registry_login: true
+proxy_port: 80
+# Geheimnisse (api_key, postgres_password, registry_password) kommen aus vault.yml:
+#   cp vault.example.yml vault.yml && ansible-vault encrypt vault.yml

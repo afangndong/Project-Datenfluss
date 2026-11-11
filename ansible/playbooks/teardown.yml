@@ -1,0 +1,25 @@
+---
+# Räumt eine temporäre Umgebung (z. B. Merge-Request-Review) vollständig ab: Container, Netzwerke, Volumes.
+#   ansible-playbook -i inventories/test playbooks/teardown.yml -e review_name=mr-42
+- name: Review-Umgebung abbauen
+  hosts: minikos
+  vars:
+    review_name: ""
+  tasks:
+    - name: review_name ist Pflicht (schützt vor dem Löschen der Haupt-Umgebung)
+      ansible.builtin.assert:
+        that: review_name | length > 0 and review_name != 'main'
+        fail_msg: "Bitte -e review_name=<mr-nummer> angeben"
+
+    - name: Compose-Projekt entfernen (inkl. Volumes)
+      ansible.builtin.command:
+        cmd: docker compose -p "minikos-{{ review_name }}" down --volumes --remove-orphans
+        chdir: "{{ mini_kos_dir }}-{{ review_name }}"
+      register: down
+      changed_when: "'Removed' in down.stderr or 'Removed' in down.stdout"
+      failed_when: false
+
+    - name: Verzeichnis löschen
+      ansible.builtin.file:
+        path: "{{ mini_kos_dir }}-{{ review_name }}"
+        state: absent

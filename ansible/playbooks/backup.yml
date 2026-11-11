@@ -1,0 +1,13 @@
+---
+# Löst ein Backup + Restore-Test sofort aus (zusätzlich zum nächtlichen Cron).
+- name: Backup und Restore-Test
+  hosts: minikos
+  tasks:
+    - name: Backup
+      ansible.builtin.command: { cmd: "scripts/backup.sh", chdir: "{{ mini_kos_dir }}" }
+      environment: { DEPLOY_ENV: "{{ mini_kos_env }}" }
+      changed_when: true
+    - name: Restore-Test (temporäre Datenbank)
+      ansible.builtin.command: { cmd: "scripts/restore_test.sh", chdir: "{{ mini_kos_dir }}" }
+      environment: { DEPLOY_ENV: "{{ mini_kos_env }}" }
+      changed_when: false

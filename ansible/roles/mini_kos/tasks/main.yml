@@ -1,0 +1,141 @@
+---
+- name: Projektverzeichnis sicherstellen
+  ansible.builtin.file: { path: "{{ mini_kos_dir }}", state: directory, mode: "0750" }
+
+- name: Projektdateien auf den Host kopieren
+  ansible.posix.synchronize:
+    src: "{{ playbook_dir }}/../../{{ item }}"
+    dest: "{{ mini_kos_dir }}/"
+    recursive: true
+    delete: false
+    rsync_opts: ["--exclude=__pycache__", "--exclude=*.pyc", "--exclude=conf.d/00-routing.conf"]
+  loop: "{{ sync_paths }}"
+  when: mini_kos_sync_files
+  notify: Reload prometheus
+
+- name: Routing-Datei nur beim ersten Mal anlegen (danach verwaltet scripts/lib.sh sie)
+  ansible.builtin.copy:
+    src: "{{ playbook_dir }}/../../nginx/conf.d/00-routing.conf"
+    dest: "{{ mini_kos_dir }}/nginx/conf.d/00-routing.conf"
+    mode: "0644"
+    force: false
+  when: mini_kos_sync_files
+
+- name: Skripte ausführbar machen
+  ansible.builtin.file:
+    path: "{{ mini_kos_dir }}/scripts"
+    mode: "a+rX,u+x"
+    recurse: true
+
+- name: env-Verzeichnis
+  ansible.builtin.file: { path: "{{ mini_kos_dir }}/env", state: directory, mode: "0750" }
+
+- name: Umgebungsdatei der App (enthält Geheimnisse, Rechte 0600)
+  ansible.builtin.template:
+    src: env.j2
+    dest: "{{ mini_kos_dir }}/env/{{ mini_kos_env }}.env"
+    mode: "0600"
+  no_log: true
+
+- name: Compose-Variablen (.env)
+  ansible.builtin.template:
+    src: compose.env.j2
+    dest: "{{ mini_kos_dir }}/.env"
+    mode: "0600"
+  no_log: true
+
+- name: Anmeldung an der Container-Registry
+  community.docker.docker_login:
+    registry_url: "{{ registry_host }}"
+    username: "{{ vault_registry_user }}"
+    password: "{{ vault_registry_password }}"
+  when: registry_login
+  no_log: true
+
+- name: Läuft der Stack schon?
+  ansible.builtin.command:
+    cmd: docker compose -f docker-compose.yml ps -q app_blue
+    chdir: "{{ mini_kos_dir }}"
+  register: stack_state
+  changed_when: false
+
+- name: Image vorab ziehen (schnellerer Wechsel, früher Fehler bei falschem Tag)
+  ansible.builtin.command:
+    cmd: "docker pull {{ app_image }}:{{ app_tag }}"
+  when: registry_login
+  changed_when: true
+
+- name: Erstinstallation – Kern-Stack starten
+  ansible.builtin.shell: |
+    set -e
+    mkdir -p .deploy
+    printf 'ACTIVE=blue\nPREVIOUS=\nBLUE_TAG={{ app_tag }}\nGREEN_TAG={{ app_tag }}\nCANARY_TAG={{ app_tag }}\nCANARY_PERCENT=0\n' > .deploy/state.env
+    docker compose -f docker-compose.yml -f docker-compose.{{ mini_kos_env }}.yml up -d db app_blue proxy
+  args:
+    chdir: "{{ mini_kos_dir }}"
+    executable: /bin/bash
+  environment:
+    APP_IMAGE: "{{ app_image }}"
+    BLUE_TAG: "{{ app_tag }}"
+  when: stack_state.stdout | length == 0
+  changed_when: true
+
+- name: Update mit Strategie „{{ deploy_strategy }}“
+  ansible.builtin.command:
+    cmd: >-
+      scripts/deploy_{{ deploy_strategy }}.sh {{ app_tag }}
+      {{ rolling_replicas if deploy_strategy == 'rolling' else (canary_percent if deploy_strategy == 'canary' else '') }}
+    chdir: "{{ mini_kos_dir }}"
+  environment:
+    DEPLOY_ENV: "{{ mini_kos_env }}"
+    PROXY_PORT: "{{ proxy_port }}"
+    APP_IMAGE: "{{ app_image }}"
+  when: stack_state.stdout | length > 0
+  changed_when: true
+
+- name: Monitoring-Stack
+  ansible.builtin.command:
+    cmd: docker compose -f docker-compose.yml -f docker-compose.{{ mini_kos_env }}.yml --profile monitoring up -d
+    chdir: "{{ mini_kos_dir }}"
+  when: enable_monitoring
+  changed_when: false
+
+- name: ELK-Stack
+  ansible.builtin.command:
+    cmd: docker compose -f docker-compose.yml -f docker-compose.{{ mini_kos_env }}.yml --profile elk up -d
+    chdir: "{{ mini_kos_dir }}"
+  when: enable_elk
+  changed_when: false
+
+- name: Feature-Flag-Server
+  ansible.builtin.command:
+    cmd: docker compose -f docker-compose.yml -f docker-compose.{{ mini_kos_env }}.yml --profile flags up -d
+    chdir: "{{ mini_kos_dir }}"
+  when: enable_flags
+  changed_when: false
+
+- name: Nächtliches Backup einrichten (Cron)
+  ansible.builtin.cron:
+    name: "mini-kos backup"
+    minute: "{{ backup_cron_time.minute }}"
+    hour: "{{ backup_cron_time.hour }}"
+    job: "cd {{ mini_kos_dir }} && DEPLOY_ENV={{ mini_kos_env }} scripts/backup.sh >> {{ mini_kos_dir }}/.backup/backup.log 2>&1"
+  when: backup_cron_enabled
+
+- name: Nachkontrolle – Anwendung bereit?
+  ansible.builtin.uri:
+    url: "http://localhost:{{ proxy_port }}/ready"
+    status_code: 200
+  register: ready
+  retries: 12
+  delay: 5
+  until: ready.status == 200
+
+- name: Nachkontrolle – Rauchtest
+  ansible.builtin.command:
+    cmd: "scripts/smoke_test.sh http://localhost:{{ proxy_port }}"
+    chdir: "{{ mini_kos_dir }}"
+  environment:
+    API_KEY: "{{ vault_api_key }}"
+  changed_when: false
+  no_log: true

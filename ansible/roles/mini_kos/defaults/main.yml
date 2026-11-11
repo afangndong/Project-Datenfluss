@@ -1,0 +1,26 @@
+---
+mini_kos_dir: /opt/mini-kos
+mini_kos_env: prod
+mini_kos_sync_files: true
+app_image: mini-kos
+app_tag: local
+deploy_strategy: rolling
+rolling_replicas: 2
+canary_percent: 10
+proxy_port: 8080
+enable_monitoring: false
+enable_elk: false
+enable_flags: false
+backup_cron_enabled: true
+backup_cron_time: { minute: "30", hour: "2" }
+registry_login: false
+registry_host: "{{ app_image.split('/')[0] }}"
+postgres_user: minikos
+postgres_db: minikos
+vault_api_key: ""
+vault_postgres_password: minikos
+vault_registry_user: ""
+vault_registry_password: ""
+vault_grafana_password: admin
+# Verzeichnisse/Dateien, die auf den Zielhost kopiert werden
+sync_paths: [docker-compose.yml, docker-compose.dev.yml, docker-compose.test.yml, docker-compose.prod.yml, nginx, monitoring, elk, scripts]

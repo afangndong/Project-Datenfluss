@@ -1,0 +1,8 @@
+---
+# Bereitet einen Server vor: Docker + Compose, Log-Rotation, Kernel-Parameter, Verzeichnisse. Idempotent.
+#   ansible-playbook -i inventories/test playbooks/provision.yml
+- name: Docker-Host bereitstellen
+  hosts: minikos
+  become: true
+  roles:
+    - docker_host

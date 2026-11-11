@@ -1,0 +1,12 @@
+mini_kos_env: dev
+mini_kos_dir: "{{ lookup('env', 'PWD') | dirname }}"   # Repo-Wurzel (Playbooks laufen in ansible/)
+mini_kos_sync_files: false                              # Dateien liegen lokal schon da
+app_image: mini-kos
+app_tag: local
+deploy_strategy: recreate
+enable_monitoring: true
+enable_elk: false
+enable_flags: false
+docker_install: false                                   # lokal ist Docker schon installiert
+backup_cron_enabled: false
+registry_login: false

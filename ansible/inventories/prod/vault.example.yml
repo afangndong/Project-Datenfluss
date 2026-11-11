@@ -1,0 +1,6 @@
+# Kopie nach vault.yml und mit `ansible-vault encrypt vault.yml` verschlüsseln. Nie unverschlüsselt committen!
+vault_api_key: "BITTE_LANGEN_ZUFALLSWERT_SETZEN"
+vault_postgres_password: "BITTE_AENDERN"
+vault_registry_user: "deploy-token"
+vault_registry_password: "BITTE_AENDERN"
+vault_grafana_password: "BITTE_AENDERN"

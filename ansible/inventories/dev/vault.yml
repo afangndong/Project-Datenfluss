@@ -1,0 +1,6 @@
+# Nur Dev – harmlose Platzhalter, keine echten Geheimnisse.
+vault_api_key: ""
+vault_postgres_password: minikos
+vault_registry_user: ""
+vault_registry_password: ""
+vault_grafana_password: admin

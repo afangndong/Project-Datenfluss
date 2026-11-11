@@ -1,0 +1,6 @@
+---
+- name: Reload prometheus
+  ansible.builtin.command: docker compose exec -T prometheus kill -HUP 1
+  args: { chdir: "{{ mini_kos_dir }}" }
+  failed_when: false
+  changed_when: true

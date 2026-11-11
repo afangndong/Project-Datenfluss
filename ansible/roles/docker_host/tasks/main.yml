@@ -1,0 +1,72 @@
+---
+- name: Docker-Installation übersprungen (docker_install=false)
+  ansible.builtin.meta: end_role
+  when: not (docker_install | default(true))
+
+- name: Voraussetzungen installieren
+  ansible.builtin.apt:
+    name: [ca-certificates, curl, gnupg, cron, python3-docker]
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+
+- name: Docker-GPG-Schlüssel ablegen
+  ansible.builtin.get_url:
+    url: "https://download.docker.com/linux/{{ ansible_distribution | lower }}/gpg"
+    dest: /etc/apt/keyrings/docker.asc
+    mode: "0644"
+
+- name: Docker-Repository eintragen
+  ansible.builtin.apt_repository:
+    repo: >-
+      deb [arch={{ 'amd64' if ansible_architecture == 'x86_64' else ansible_architecture }}
+      signed-by=/etc/apt/keyrings/docker.asc]
+      https://download.docker.com/linux/{{ ansible_distribution | lower }}
+      {{ ansible_distribution_release }} stable
+    filename: docker
+    state: present
+
+- name: Docker Engine + Compose-Plugin installieren
+  ansible.builtin.apt:
+    name: [docker-ce, docker-ce-cli, containerd.io, docker-buildx-plugin, docker-compose-plugin]
+    state: present
+    update_cache: true
+
+- name: Docker-Daemon konfigurieren (Log-Rotation)
+  ansible.builtin.copy:
+    dest: /etc/docker/daemon.json
+    mode: "0644"
+    content: |
+      {
+        "log-driver": "json-file",
+        "log-opts": { "max-size": "10m", "max-file": "5" },
+        "live-restore": true
+      }
+  notify: Restart docker
+
+- name: Docker aktivieren und starten
+  ansible.builtin.systemd:
+    name: docker
+    enabled: true
+    state: started
+
+- name: Deploy-Benutzer in Gruppe docker (kein sudo für Deployments nötig)
+  ansible.builtin.user:
+    name: "{{ ansible_user | default('deploy') }}"
+    groups: docker
+    append: true
+
+- name: vm.max_map_count für Elasticsearch
+  ansible.posix.sysctl:
+    name: vm.max_map_count
+    value: "262144"
+    state: present
+    sysctl_set: true
+  when: enable_elk | default(false)
+
+- name: Projektverzeichnis anlegen
+  ansible.builtin.file:
+    path: "{{ mini_kos_dir }}"
+    state: directory
+    owner: "{{ ansible_user | default('deploy') }}"
+    mode: "0750"

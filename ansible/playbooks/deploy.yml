@@ -1,0 +1,26 @@
+---
+# Deployment mit wählbarer Strategie. Host für Host (serial: 1), bei Fehler Abbruch vor dem nächsten Host.
+#   ansible-playbook -i inventories/prod playbooks/deploy.yml -e app_tag=ab12cd34 -e deploy_strategy=rolling
+# Geheimnisse: inventories/<env>/vault.yml (test/prod mit ansible-vault verschlüsselt; --ask-vault-pass).
+- name: Mini-KOS ausrollen
+  hosts: minikos
+  serial: 1
+  max_fail_percentage: 0
+  vars_files:
+    - "{{ inventory_dir }}/vault.yml"
+  pre_tasks:
+    - name: Gültige Strategie?
+      ansible.builtin.assert:
+        that: deploy_strategy in ['rolling', 'bluegreen', 'canary', 'recreate']
+        fail_msg: "deploy_strategy muss rolling|bluegreen|canary|recreate sein"
+    - name: Prod-Geheimnisse gesetzt und keine Platzhalter?
+      ansible.builtin.assert:
+        that:
+          - vault_api_key | length >= 16
+          - "'BITTE' not in vault_api_key"
+          - "'BITTE' not in vault_postgres_password"
+        fail_msg: "vault.yml enthält Platzhalter oder zu kurze Werte – bitte echte Geheimnisse setzen"
+      when: mini_kos_env == 'prod'
+      no_log: true
+  roles:
+    - mini_kos
