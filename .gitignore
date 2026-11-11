@@ -1,0 +1,13 @@
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+.ruff_cache/
+*.db
+.deploy/
+.backup/
+env/prod.env
+ansible/inventories/test/vault.yml
+ansible/inventories/prod/vault.yml
+ansible/*.retry
+reports/
