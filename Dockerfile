@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1.7
 # ---------- Stage 1: Build (Wheels bauen, Layer-Cache über BuildKit) ----------
-FROM python:3.12-slim AS builder
+FROM python:3.15-slim AS builder
 ENV PIP_DISABLE_PIP_VERSION_CHECK=1
 WORKDIR /build
 COPY requirements.txt .
@@ -8,7 +8,7 @@ RUN --mount=type=cache,target=/root/.cache/pip \
     pip wheel --wheel-dir /wheels -r requirements.txt
 
 # ---------- Stage 2: Runtime (klein, ohne Build-Tools, non-root) ----------
-FROM python:3.12-slim AS runtime
+FROM python:3.15-slim AS runtime
 ARG APP_VERSION=1.0.0
 ARG GIT_SHA=local
 LABEL org.opencontainers.image.title="mini-kos" \
