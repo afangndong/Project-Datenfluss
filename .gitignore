@@ -11,3 +11,8 @@ ansible/inventories/test/vault.yml
 ansible/inventories/prod/vault.yml
 ansible/*.retry
 reports/
+.venv/
+.env
+env/
+__pycache__/
+*.pyc

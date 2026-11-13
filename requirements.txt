@@ -1,6 +1,6 @@
-fastapi==0.115.6
-uvicorn[standard]==0.34.0
-sqlalchemy==2.0.36
-psycopg2-binary==2.9.10
-pydantic-settings==2.7.0
-prometheus-client==0.21.1
+fastapi==0.162.4
+uvicorn[standard]==0.54.0
+sqlalchemy==2.0.57
+psycopg2-binary==2.9.13
+pydantic-settings==2.16.2
+prometheus-client==0.26.0

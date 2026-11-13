@@ -64,7 +64,7 @@ services:
 
   proxy:
     image: nginx:1.27-alpine
-    ports: ["${PROXY_PORT:-8080}:80"]
+    ports: ["${PROXY_PORT:-8888}:80"]
     volumes:
       - ./nginx/conf.d:/etc/nginx/conf.d:ro
     depends_on: [app_blue]
